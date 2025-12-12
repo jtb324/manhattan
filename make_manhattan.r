@@ -31,15 +31,26 @@ check_output_dir_exists = function(output_dir) {
   }
 }
 
-reformat = function(df, pval_col) {
-    df = df %>% mutate("ID" = paste0(df$CHR, ":", df$POS))
-    print(head(df))
-    out = df %>% 
-            select(c("ID", "CHR", "POS", {{ pval_col }})) %>%
-            drop_na() %>%
-            mutate("CHR" = as.numeric(gsub("chr", "", CHR))) 
-    colnames(out) = c("SNP", "CHR", "BP", "P")
-    return(out)
+reformat = function(dt, args) {
+  # 1. Clean Chromosome column (remove 'chr', convert to numeric)
+  dt[, CHR := as.numeric(gsub("chr", "", CHR, ignore.case=TRUE))]
+  
+  # 2. Calculate Cumulative Position (Vectorized - Instant)
+  #    Get max BP per chromosome
+  chr_max = dt[, .(max_bp = max(POS, na.rm=TRUE)), by = CHR][order(CHR)]
+  
+  #    Calculate offset (lagged cumulative sum)
+  chr_max[, offset := shift(cumsum(as.numeric(max_bp)), fill = 0, type = "lag")]
+  
+  #    Update main table by reference (fastest possible join)
+  setkey(dt, CHR)
+  setkey(chr_max, CHR)
+  dt[chr_max, BPcum := POS + i.offset]
+  
+  #    Calculate axis labels
+  axisdf = dt[, .(center = (min(BPcum) + max(BPcum)) / 2), by = CHR]
+  
+  return(list(data = dt, axis = axisdf))
 }
 
 # If the user passes 
@@ -64,44 +75,29 @@ gather_input_files = function(input_path, pattern, pval_col) {
   return(df)
 }
 
-generate_manhattan = function(args, df) {
-  don <- reformatted_input %>% 
+generate_manhattan = function(don, axisdf, args) {
   
-    # Compute chromosome size
-    group_by(CHR) %>% 
-    summarise(chr_len=max(BP)) %>% 
-    
-    # Calculate cumulative position of each chromosome
-    mutate(tot=cumsum(as.numeric(chr_len))-chr_len) %>%
-    select(-chr_len) %>%
-    
-    # Add this info to the initial dataset
-    left_join(reformatted_input, ., by=c("CHR"="CHR")) %>%
-    
-    # Add a cumulative position of each SNP
-    arrange(CHR, BP) %>%
-    mutate( BPcum=BP+tot) %>%
-    mutate( is_annotate=ifelse(P>args$`annotate-threshold`, "yes", "no")) 
+  # setDT(don)
+  
+  don[, is_annotate := ifelse(PVAL >= -log10(args$`annotate-threshold`), "yes", "no")]
+  
+  # Create label for annotation (Only create string for the few top hits)
+  don[is_annotate == "yes", SNP_ID := paste0(CHR, ":", POS)]
 
-  axisdf = don %>%
-    group_by(CHR) %>%
-    summarize(center=( max(BPcum) + min(BPcum) ) / 2 )
-
-  manhattan = ggplot(don, aes(x=BPcum, y=P)) +
+  manhattan = ggplot(don, aes(x=BPcum, y=PVAL)) +
       # Show all points
       geom_point( aes(color=as.factor(CHR)), alpha=0.8, size=1.3) +
       scale_color_manual(values = rep(c("grey", "skyblue"), 22 )) +
       xlab("CHR") +
       # custom X axis:
       scale_x_continuous( label = axisdf$CHR, breaks= axisdf$center ) +
-      scale_y_continuous(limits=c(0,9), breaks=seq(0, 9, 1)) +   
+      scale_y_continuous(expand = c(0, 0), limits=c(0, max(-log10(don$PVAL)) + 1)) +   
       geom_hline(yintercept=-log10(args$bonferroni), color="red", linetype="dashed") +  
       geom_hline(yintercept=-log10(args$suggestive), color="blue", linetype="dashed") +# remove space between plot area and x axis
-      ggtitle(paste0("GWID:", args$`phecode-name`)) +
+      ggtitle(paste0("GWID:", args$`pheno-name`)) +
       # Custom the theme:
       theme_classic() +
       # Add label using ggrepel to avoid overlapping
-      geom_label_repel(data=subset(don, is_annotate=="yes"), aes(label=SNP), size=3) +
       theme( 
         legend.position="none",
         panel.border = element_blank(),
@@ -110,42 +106,38 @@ generate_manhattan = function(args, df) {
         axis.text.y = element_text(size=12),
         axis.title=element_text(size=14,face="bold"),
         panel.grid.minor.x = element_blank()
-      )
+      ) +
+      geom_label_repel(data=don[is_annotate=="yes"], aes(label=SNP_ID), size=3)
 
   return(manhattan)
 }
 
-generate_qqplot = function(args, df) {
-  reformatted_input = reformatted_input %>% mutate(OrigP=10**(-1*P)) %>% arrange(OrigP)
+generate_qqplot = function(dt, args) {
+  # Sort by PVAL
+  # setorder(dt, PVAL)
+  
+  raw_p = 10^(-dt$PVAL)
+  # Observe p-values
+  # observed = -log10(dt$PVAL)
+  observed = sort(dt$PVAL)
 
-  chisq <- qchisq(1 - reformatted_input$OrigP, 1)
+  # Expected p-values (uniform distribution)
+  expected = -log10(ppoints(length(observed)))
+  
+  qq_df = data.table(observed = observed, expected = expected)
+  
+  # Lambda calculation
+  chisq <- qchisq(1 - raw_p, 1)
   lambda <- median(chisq) / qchisq(0.5, 1)
-
-  qqplot = ggplot(reformatted_input, aes(sample=P)) +
-    stat_qq(distribution = stats::qunif) + 
-    stat_qq_line() +
-    xlab("observed") +
-    ylab("expected") +
-    annotate(
-      geom = "text",
-      x = -Inf,
-      y = Inf,
-      hjust = -0.15,
-      vjust = 1 + 0.15 * 3,
-      label = sprintf("λ = %.2f", lambda),
-      size = 8
-    ) +
-    theme_classic() +
-    theme(
-      legend.position="none",
-      panel.border = element_blank(),
-      panel.grid.major.x = element_blank(),
-      axis.text.x= element_text(size=12),
-      axis.text.y = element_text(size=12),
-      axis.title=element_text(size=14,face="bold"),
-      panel.grid.minor.x = element_blank()
-    )
-  return(qqplot)
+  
+  p = ggplot(qq_df, aes(x=expected, y=observed)) +
+    geom_point(size=1) +
+    geom_abline(intercept=0, slope=1, color="red") +
+    annotate("text", x=1, y=max(observed)*0.9, label=sprintf("λ = %.2f", lambda), size=6) +
+    labs(x="Expected -log10(P)", y="Observed -log10(P)") +
+    theme_classic()
+    
+  return(p)
 }
 
 # Lets create a commandline parser
@@ -184,17 +176,21 @@ df = df %>% dplyr::filter(A1FREQ >= args$`maf-threshold`)
 print(paste0(nrow(df), " variants passed the ", args$`maf-threshold`, " MAF threshold"))
 
 # By this point we have changed the pvalue column to be PVAL
-reformatted_input = reformat(df, "PVAL")
+# reformatted_input = reformat(df, "PVAL")
+reformatted_inputs = reformat(df, args)
+
+df_plot = reformatted_inputs$data
+axis_df = reformatted_inputs$axis
 
 print("Generating a manhattan plot from the GWAS results")
-manhattan = generate_manhattan(args, reformatted_input)
+manhattan = generate_manhattan(df_plot, axis_df, args)
 
-ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan.png")), plot=manhattan, width=12, height=8)
+ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan_v2.png")), plot=manhattan, width=12, height=8)
 
 print("Generating a QQ-plot from the GWAS results")
-qqplot = generate_qqplot(args, reformatted_input)
+qqplot = generate_qqplot(df_plot, args)
 
-ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`,"agd250k_parkinsons_qqplot_12_11_25.png")), plot=qqplot)
+ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`,"_qqplot_v2.png")), plot=qqplot)
 
 
 
