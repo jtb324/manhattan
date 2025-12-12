@@ -122,7 +122,7 @@ generate_qqplot = function(dt, args) {
   observed = sort(dt$PVAL)
 
   # Expected p-values (uniform distribution)
-  expected = -log10(ppoints(length(observed)))
+  expected = sort(-log10(ppoints(length(observed))))
   
   qq_df = data.table(observed = observed, expected = expected)
   
@@ -182,10 +182,10 @@ reformatted_inputs = reformat(df, args)
 df_plot = reformatted_inputs$data
 axis_df = reformatted_inputs$axis
 
-print("Generating a manhattan plot from the GWAS results")
-manhattan = generate_manhattan(df_plot, axis_df, args)
+# print("Generating a manhattan plot from the GWAS results")
+# manhattan = generate_manhattan(df_plot, axis_df, args)
 
-ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan_v2.png")), plot=manhattan, width=12, height=8)
+# ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan_v2.png")), plot=manhattan, width=12, height=8)
 
 print("Generating a QQ-plot from the GWAS results")
 qqplot = generate_qqplot(df_plot, args)
