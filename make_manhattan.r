@@ -1,6 +1,3 @@
-
-# I kept the original copy of Ryan's script intact (plot_res4.r)
-
 suppressPackageStartupMessages(library(Haplin))
 suppressPackageStartupMessages(library(optparse))
 suppressPackageStartupMessages(library(CMplot))
@@ -9,29 +6,6 @@ suppressPackageStartupMessages(library(ggplot2))
 suppressPackageStartupMessages(library(tidyverse))
 suppressPackageStartupMessages(library(ggrepel))
 suppressPackageStartupMessages(library(dplyr))
-
-filter = function(df) {
-    lastpos = 0
-    lastchr = 0
-    pos = 0
-    out = NULL
-    for(row in 1:dim(df)[1]) {
-        chrom = df[row, 1]
-        pos = pos + df[row, 3]
-        if(chrom == lastchr) {
-            if(pos - lastpos > 1) {
-                lastchr = chrom
-                lastpos = pos
-                out = rbind(out, df[row,])
-            }
-        } else {
-            lastchr = chrom
-            lastpos = pos
-            out = rbind(out, df[row,])
-        }
-    }
-    out
-}
 
 # Check whether the provided arguments are valid
 check_args_validity = function(args) {
@@ -59,6 +33,7 @@ check_output_dir_exists = function(output_dir) {
 
 reformat = function(df, pval_col) {
     df = df %>% mutate("ID" = paste0(df$CHR, ":", df$POS))
+    print(head(df))
     out = df %>% 
             select(c("ID", "CHR", "POS", {{ pval_col }})) %>%
             drop_na() %>%
@@ -85,7 +60,7 @@ gather_input_files = function(input_path, pattern, pval_col) {
     df = fread(input_path) %>%
             rename(c("POS"="GENPOS", "PVAL"={{ pval_col }}, "CHR"="CHROM")) 
   }
-  print(paste0("Read in" , nrow(combined_df), " variants from the input"))
+  print(paste0("Read in " , nrow(df), " variants from the input"))
   return(df)
 }
 
@@ -204,17 +179,19 @@ check_output_dir_exists(args$`output-dir`)
 
 df = gather_input_files(args$input, args$pattern, args$`pval-col`)
 
-combined_df = df %>% dplyr::filter(A1FREQ >= args$`maf-threshold`)
+df = df %>% dplyr::filter(A1FREQ >= args$`maf-threshold`)
 
-print(paste0(nrow(combined_df), " variants that passed the ", args$`maf-threshold`, " MAF threshold"))
+print(paste0(nrow(df), " variants passed the ", args$`maf-threshold`, " MAF threshold"))
 
 # By this point we have changed the pvalue column to be PVAL
 reformatted_input = reformat(df, "PVAL")
 
+print("Generating a manhattan plot from the GWAS results")
 manhattan = generate_manhattan(args, reformatted_input)
 
 ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan.png")), plot=manhattan, width=12, height=8)
 
+print("Generating a QQ-plot from the GWAS results")
 qqplot = generate_qqplot(args, reformatted_input)
 
 ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`,"agd250k_parkinsons_qqplot_12_11_25.png")), plot=qqplot)
