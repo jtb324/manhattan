@@ -1,6 +1,3 @@
-
-# I kept the original copy of Ryan's script intact (plot_res4.r)
-
 suppressPackageStartupMessages(library(Haplin))
 suppressPackageStartupMessages(library(optparse))
 suppressPackageStartupMessages(library(CMplot))
@@ -11,8 +8,136 @@ suppressPackageStartupMessages(library(ggrepel))
 suppressPackageStartupMessages(library(dplyr))
 
 # Check whether the provided arguments are valid
-check_args = function(args) {
+check_args_validity = function(args) {
 
+  # first check if the file exists
+  if (!file.exists(args$input)) {
+    print(paste0("ERROR: the input file, ", args$input, " does not exist"))
+    stop()
+  }
+  # Next we need to ensure that if the user provided a pattern 
+  # that they also provided a directory and not a file
+  is_file = file.exists(args$input) && !dir.exists(args$input)
+  if (is_file &&  args$pattern) {
+    print("ERROR: A file and a pattern string were provided as inputs for the program. If you are providing a pattern as input, you need to provide a directory as the input.")
+    stop()
+  } 
+}
+
+check_output_dir_exists = function(output_dir) {
+  if (!dir.exists(output_dir)) {
+    print(paste0("The output directory, ", output_dir, " does not exist. Creating it now"))
+    dir.create(args$output_dir)
+  }
+}
+
+reformat = function(dt, args) {
+  # 1. Clean Chromosome column (remove 'chr', convert to numeric)
+  dt[, CHR := as.numeric(gsub("chr", "", CHR, ignore.case=TRUE))]
+  
+  # 2. Calculate Cumulative Position (Vectorized - Instant)
+  #    Get max BP per chromosome
+  chr_max = dt[, .(max_bp = max(POS, na.rm=TRUE)), by = CHR][order(CHR)]
+  
+  #    Calculate offset (lagged cumulative sum)
+  chr_max[, offset := shift(cumsum(as.numeric(max_bp)), fill = 0, type = "lag")]
+  
+  #    Update main table by reference (fastest possible join)
+  setkey(dt, CHR)
+  setkey(chr_max, CHR)
+  dt[chr_max, BPcum := POS + i.offset]
+  
+  #    Calculate axis labels
+  axisdf = dt[, .(center = (min(BPcum) + max(BPcum)) / 2), by = CHR]
+  
+  return(list(data = dt, axis = axisdf))
+}
+
+# If the user passes 
+gather_input_files = function(input_path, pattern, pval_col) {
+  if (dir.exists(input_path)) {
+    input_files = list.files(path = input_path, pattern = pattern, full.names=TRUE, recursive=T)
+    print(paste0("Found ", length(input_files), " files from the analysis"))
+
+    if (length(input_files) == 0) {
+        print(paste0("There were not files found in the directory, ", input_path, " that had the pattern, ", pattern, ". Terminating program now."))
+        stop()
+    }
+    print(paste0("Combining all ", length(input_files), " input files"))
+    df = input_files %>%
+                map_dfr(~fread(.)) %>% 
+                rename(c("POS"="GENPOS", "PVAL"="LOG10P", "CHR"="CHROM")) 
+  } else if (!dir.exists(input_path) && file.exists(input_path)) {
+    df = fread(input_path) %>%
+            rename(c("POS"="GENPOS", "PVAL"={{ pval_col }}, "CHR"="CHROM")) 
+  }
+  print(paste0("Read in " , nrow(df), " variants from the input"))
+  return(df)
+}
+
+generate_manhattan = function(don, axisdf, args) {
+  
+  # setDT(don)
+  
+  don[, is_annotate := ifelse(PVAL >= -log10(args$`annotate-threshold`), "yes", "no")]
+  
+  # Create label for annotation (Only create string for the few top hits)
+  don[is_annotate == "yes", SNP_ID := paste0(CHR, ":", POS)]
+
+  manhattan = ggplot(don, aes(x=BPcum, y=PVAL)) +
+      # Show all points
+      geom_point( aes(color=as.factor(CHR)), alpha=0.8, size=1.3) +
+      scale_color_manual(values = rep(c("grey", "skyblue"), 22 )) +
+      xlab("CHR") +
+      # custom X axis:
+      scale_x_continuous( label = axisdf$CHR, breaks= axisdf$center ) +
+      scale_y_continuous(expand = c(0, 0), limits=c(0, max(-log10(don$PVAL)) + 1)) +   
+      geom_hline(yintercept=-log10(args$bonferroni), color="red", linetype="dashed") +  
+      geom_hline(yintercept=-log10(args$suggestive), color="blue", linetype="dashed") +# remove space between plot area and x axis
+      ggtitle(paste0("GWID:", args$`pheno-name`)) +
+      # Custom the theme:
+      theme_classic() +
+      # Add label using ggrepel to avoid overlapping
+      theme( 
+        legend.position="none",
+        panel.border = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.text.x= element_text(size=12),
+        axis.text.y = element_text(size=12),
+        axis.title=element_text(size=14,face="bold"),
+        panel.grid.minor.x = element_blank()
+      ) +
+      geom_label_repel(data=don[is_annotate=="yes"], aes(label=SNP_ID), size=3)
+
+  return(manhattan)
+}
+
+generate_qqplot = function(dt, args) {
+  # Sort by PVAL
+  # setorder(dt, PVAL)
+  
+  raw_p = 10^(-dt$PVAL)
+  # Observe p-values
+  # observed = -log10(dt$PVAL)
+  observed = sort(dt$PVAL)
+
+  # Expected p-values (uniform distribution)
+  expected = sort(-log10(ppoints(length(observed))))
+  
+  qq_df = data.table(observed = observed, expected = expected)
+  
+  # Lambda calculation
+  chisq <- qchisq(1 - raw_p, 1)
+  lambda <- median(chisq) / qchisq(0.5, 1)
+  
+  p = ggplot(qq_df, aes(x=expected, y=observed)) +
+    geom_point(size=1) +
+    geom_abline(intercept=0, slope=1, color="red") +
+    annotate("text", x=1, y=max(observed)*0.9, label=sprintf("λ = %.2f", lambda), size=6) +
+    labs(x="Expected -log10(P)", y="Observed -log10(P)") +
+    theme_classic()
+    
+  return(p)
 }
 
 # Lets create a commandline parser
@@ -20,7 +145,7 @@ parser = OptionParser()
 
 parser = add_option(parser, c("--input"), help="Path to either the output file from the GWAS or to the directory that has the output files from the GWAS", type="character")
 
-parser = add_option(parser, c("--phecode-name"), help="Name of the phenotype that the analysis was done for. This value will be used as the title in the output plots.", type="character")
+parser = add_option(parser, c("--pheno-name"), help="Name of the phenotype that the analysis was done for. This value will be used as the title in the output plots.", type="character")
 
 parser = add_option(parser, c("--maf-threshold"), help="Minor allele threshold so that SNPs below this value will be excluded from the plot.", type="double", default=0.01)
 
@@ -34,228 +159,42 @@ parser = add_option(parser, c("--suggestive"), help="Suggestive significance thr
 
 parser = add_option(parser, c("--output-dir"), help="Path of a directory to write the output Manhattan and QQ-plot to.", type="character", default="test.png")
 
+parser = add_option(parser, c("--pval-col"), help="Name of the column that has pvalues from the analysis", type="character", default="PVal")
+
 # parser = add_option(parser)
 
-parse_args(parser)
+args = parse_args(parser)
 
-filter = function(df) {
-    lastpos = 0
-    lastchr = 0
-    pos = 0
-    out = NULL
-    for(row in 1:dim(df)[1]) {
-        chrom = df[row, 1]
-        pos = pos + df[row, 3]
-        if(chrom == lastchr) {
-            if(pos - lastpos > 1) {
-                lastchr = chrom
-                lastpos = pos
-                out = rbind(out, df[row,])
-            }
-        } else {
-            lastchr = chrom
-            lastpos = pos
-            out = rbind(out, df[row,])
-        }
-    }
-    out
-}
+check_args_validity(args)
 
-reformat = function(df, pval_col) {
-    out = df %>% 
-            select(c("ID", "CHR", "POS", {{ pval_col }})) %>%
-            drop_na() %>%
-            mutate("CHR" = as.numeric(gsub("chr", "", CHR))) 
-    colnames(out) = c("SNP", "CHR", "BP", "P")
-    out
-}
+check_output_dir_exists(args$`output-dir`)
 
+df = gather_input_files(args$input, args$pattern, args$`pval-col`)
 
-MAF_THRESHOLD=0.001
+df = df %>% dplyr::filter(A1FREQ >= args$`maf-threshold`)
 
+print(paste0(nrow(df), " variants passed the ", args$`maf-threshold`, " MAF threshold"))
 
-# full_output_path = paste("./", , sep="/")
-phecode_name = "Parkinsons"
-input_dir = "/data100t1/home/james/agd250k/parkinsons/gwas/phers_results/step2_output"
+# By this point we have changed the pvalue column to be PVAL
+# reformatted_input = reformat(df, "PVAL")
+reformatted_inputs = reformat(df, args)
 
-# we need to merge the initial 22 chromosomes into 1 file 
-input_files = list.files(path = input_dir, pattern = "*.regenie$", full.names=TRUE, recursive=T)
-print(paste0("Found ", length(input_files), " files from the analysis"))
+df_plot = reformatted_inputs$data
+axis_df = reformatted_inputs$axis
 
-if (length(input_files) == 0) {
-    quit()
-}
+# print("Generating a manhattan plot from the GWAS results")
+# manhattan = generate_manhattan(df_plot, axis_df, args)
 
-combined_df = input_files %>%
-                map_dfr(~fread(.)) %>% 
-                rename(c("POS"="GENPOS", "PVAL"="LOG10P", "CHR"="CHROM")) 
-                
-combined_df = combined_df %>% dplyr::filter(A1FREQ >= MAF_THRESHOLD)
+# ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`, "_gwas_manhattan_v2.png")), plot=manhattan, width=12, height=8)
 
-print(nrow(combined_df))
+print("Generating a QQ-plot from the GWAS results")
+qqplot = generate_qqplot(df_plot, args)
 
-annolevel = -log10(5e-8)
-
-
-df = combined_df %>% mutate("ID" = paste0(combined_df$CHR, ":", combined_df$POS))
-
-reformatted_input = reformat(df, "PVAL")
-
-don <- reformatted_input %>% 
-  
-  # Compute chromosome size
-  group_by(CHR) %>% 
-  summarise(chr_len=max(BP)) %>% 
-  
-  # Calculate cumulative position of each chromosome
-  mutate(tot=cumsum(as.numeric(chr_len))-chr_len) %>%
-  select(-chr_len) %>%
-  
-  # Add this info to the initial dataset
-  left_join(reformatted_input, ., by=c("CHR"="CHR")) %>%
-  
-  # Add a cumulative position of each SNP
-  arrange(CHR, BP) %>%
-  mutate( BPcum=BP+tot) %>%
-  mutate( is_annotate=ifelse(P>annolevel, "yes", "no")) 
-
-axisdf = don %>%
-  group_by(CHR) %>%
-  summarize(center=( max(BPcum) + min(BPcum) ) / 2 )
-
-manhattan = ggplot(don, aes(x=BPcum, y=P)) +
-    # Show all points
-    geom_point( aes(color=as.factor(CHR)), alpha=0.8, size=1.3) +
-    scale_color_manual(values = rep(c("grey", "skyblue"), 22 )) +
-    xlab("CHR") +
-    # custom X axis:
-    scale_x_continuous( label = axisdf$CHR, breaks= axisdf$center ) +
-    scale_y_continuous(limits=c(0,9), breaks=seq(0, 9, 1)) +   
-    geom_hline(yintercept=-log10(0.05/1000000), color="red", linetype="dashed") +  
-    geom_hline(yintercept=-log10(1e-5), color="blue", linetype="dashed") +# remove space between plot area and x axis
-    ggtitle(paste0("GWID:", phecode_name)) +
-    # Custom the theme:
-    theme_classic() +
-    # Add label using ggrepel to avoid overlapping
-    geom_label_repel(data=subset(don, is_annotate=="yes"), aes(label=SNP), size=3) +
-    theme( 
-      legend.position="none",
-      panel.border = element_blank(),
-      panel.grid.major.x = element_blank(),
-      axis.text.x= element_text(size=12),
-      axis.text.y = element_text(size=12),
-      axis.title=element_text(size=14,face="bold"),
-      panel.grid.minor.x = element_blank()
-    )
-
-plots_dir = "/data100t1/home/james/agd250k/parkinsons/gwas/phers_results/plots"
-if (!dir.exists(plots_dir)) {
-    dir.create(plots_dir)
-}
-
-
-ggsave(file.path(plots_dir, "agd250k_parkinsons_phers_gwas_manhattan.png"), plot=manhattan, width=12, height=8)
-
-reformatted_input = reformatted_input %>% mutate(OrigP=10**(-1*P)) %>% arrange(OrigP)
-
-chisq <- qchisq(1 - reformatted_input$OrigP, 1)
-lambda <- median(chisq) / qchisq(0.5, 1)
-
-qqplot = ggplot(reformatted_input, aes(sample=P)) +
-  stat_qq(distribution = stats::Uniform) + 
-  stat_qq_line() +
-  xlab("observed") +
-  ylab("expected") +
-  annotate(
-    geom = "text",
-    x = -Inf,
-    y = Inf,
-    hjust = -0.15,
-    vjust = 1 + 0.15 * 3,
-    label = sprintf("λ = %.2f", lambda),
-    size = 8
-  ) +
-  theme_classic() +
-  theme(
-    legend.position="none",
-    panel.border = element_blank(),
-    panel.grid.major.x = element_blank(),
-    axis.text.x= element_text(size=12),
-    axis.text.y = element_text(size=12),
-    axis.title=element_text(size=14,face="bold"),
-    panel.grid.minor.x = element_blank()
-  )
-
-ggsave(file.path(plots_dir, "agd250k_parkinsons_qqplot_12_11_25.png"), plot=qqplot)
-
-
-# plot_data <- reformatted_input %>%
-#   arrange(OrigP) %>%   # Sort p-values from smallest to largest
-#   mutate(
-#     # Calculate Observed -log10 P-values
-#     observed = -log10(OrigP),
-    
-#     # Calculate Expected -log10 P-values
-#     # ppoints(n) generates n evenly spaced probabilities between 0 and 1
-#     expected = -log10(ppoints(n()))
-#   )
-
-# lambda_value <- median(qchisq(1 - reformatted_input$OrigP, 1)) / qchisq(0.5, 1)
-# lambda_label <- paste("Lambda =", round(lambda_value, 3))
-
-# v2_qq = ggplot(plot_data, aes(x = expected, y = observed)) +
-#   # Add the points
-#   geom_point(alpha = 0.5, size = 2) +
-  
-#   # Add the null hypothesis line (y = x)
-#   geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
-  
-#   # Add labels and theme
-#   labs(
-#     title = "Parkinsons QQ Plot",
-#     x = expression(Expected ~ -log[10](P)),
-#     y = expression(Observed ~ -log[10](P)),
-#     caption = lambda_label
-#   ) +
-#   theme_minimal() + 
-#   theme(
-#     plot.title = element_text(hjust = 0.5),
-#     panel.grid.minor = element_blank()
-#   )
-
-# ggsave(file.path(plots_dir, "agd250k_parkinsons_qqplot_v2_12_11_25.png"), plot=v2_qq)
-# print(head(reformatted_input))
-# # print(head(df))
-# # This will pull out the value for the FWER or FDR
-# # genomewide_avg = df[1, "PAdjCutoff"]
-# # df$PVal is the list of p values we want to feed into the chisq
-# # http://genometoolbox.blogspot.com/2014/08/how-to-calculate-genomic-inflation.html
-# chisq <- qchisq(1 - reformatted_input$P, 1)
-# avg <- median(chisq) / qchisq(0.5, 1)
-# avg <- round(avg, digits = 3)
-# pdf(output_qq_filename, 10, 10)
-# pQQ(reformatted_input$P, main= paste(phecode_name,  "AFR QQ-plot"))
-# text(0.5, 5, avg, cex = 1, font = 2)
-# dev.off()
-
-# gen.line = -log10(5e-8)
-# # sug.line = NULL
-
-# # df <- reformat(df)
-# # print(head(df))
-# minp = max(c(min(df$P), 0.05))
-# pdf(output_manhattan_filename, 8, 8)
+ggsave(file.path(args$`output-dir`, paste0(args$`pheno-name`,"_qqplot_v2.png")), plot=qqplot)
 
 
 
-# manhattan(reformatted_input, main = paste(phecode_name,  "AFR Manhattan plot"), annotatePval = minp, genomewideline = gen.line, suggestiveline = -log10(1e-5), cex.lab=1.2, cex.axis=1.2)
-# # manhattan(df, main = paste(phecode_name, "(", phecode, ")",  "Manhattan plot"), annotatePval = minp, genomewideline = -log10(genomewide_avg), ylim=c(0,8), suggestiveline = 0, cex.lab=1.2, cex.axis=1.2)
 
-# # abline(h = -log10(1/100001), col = "blue", lty=2, lwd=3)  
-# dev.off()   
-    
-# write phecode, phecode_name, and avg to a txt file 
-# datastr = paste("", "\t", phecode_name, "\t", avg, "\n")
-    # cat(datastr, file="genomic_inflation_factors.txt", append = TRUE)
-    
-# }
+
+
+
