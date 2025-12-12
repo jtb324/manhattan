@@ -69,7 +69,7 @@ reformat = function(df, pval_col) {
 
 # If the user passes 
 gather_input_files = function(input_path, pattern, pval_col) {
-  if dir.exists(input_path) {
+  if (dir.exists(input_path)) {
     input_files = list.files(path = input_path, pattern = pattern, full.names=TRUE, recursive=T)
     print(paste0("Found ", length(input_files), " files from the analysis"))
 
@@ -77,7 +77,7 @@ gather_input_files = function(input_path, pattern, pval_col) {
         print(paste0("There were not files found in the directory, ", input_path, " that had the pattern, ", pattern, ". Terminating program now."))
         stop()
     }
-    print(paste0("Combining all ", length(input_file), " input files"))
+    print(paste0("Combining all ", length(input_files), " input files"))
     df = input_files %>%
                 map_dfr(~fread(.)) %>% 
                 rename(c("POS"="GENPOS", "PVAL"="LOG10P", "CHR"="CHROM")) 
