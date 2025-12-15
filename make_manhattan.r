@@ -1,6 +1,4 @@
-suppressPackageStartupMessages(library(Haplin))
 suppressPackageStartupMessages(library(optparse))
-suppressPackageStartupMessages(library(CMplot))
 suppressPackageStartupMessages(library(data.table))
 suppressPackageStartupMessages(library(ggplot2))
 suppressPackageStartupMessages(library(tidyverse))

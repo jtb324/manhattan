@@ -1,0 +1,14 @@
+name: manhattan_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - r-base=4.3.0 # Using R version 4.3.0 as requested
+  - r-optparse
+  - r-datatable
+  - r-tidyverse
+  - r-ggrepel
+  - r-dplyr # Although part of tidyverse, explicitly adding for clarity
+  - r-ggplot2 # Although part of tidyverse, explicitly adding for clarity
+flags:
+  allow_missing_checksums: true
