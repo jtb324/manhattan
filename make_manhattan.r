@@ -73,22 +73,21 @@ gather_input_files <- function(input_path, pattern, pval_col) {
 }
 
 
-generate_manhattan <- function(don, axisdf, args, colors) {
-  # setDT(don)
+generate_manhattan <- function(snp_data, axisdf, args, colors) {
 
-  don[, is_annotate := ifelse(PVAL >= -log10(args$`annotate-threshold`), "yes", "no")]
+  snp_data[, is_annotate := ifelse(PVAL >= -log10(args$`annotate-threshold`), "yes", "no")]
 
   # Create label for annotation (Only create string for the few top hits)
-  don[is_annotate == "yes", SNP_ID := paste0(CHR, ":", POS)]
+  snp_data[is_annotate == "yes", SNP_ID := paste0(CHR, ":", POS)]
 
-  manhattan <- ggplot(don, aes(x = BPcum, y = PVAL)) +
+  manhattan <- ggplot(snp_data, aes(x = BPcum, y = PVAL)) +
     # Show all points
     geom_point(aes(color = as.factor(CHR)), alpha = 0.8, size = 1.3) +
     scale_color_manual(values = rep(colors, 22)) +
     xlab("CHR") +
     # custom X axis:
     scale_x_continuous(label = axisdf$CHR, breaks = axisdf$center) +
-    scale_y_continuous(expand = c(0, 0), limits = c(0, max(-log10(don$PVAL)) + 1)) +
+    scale_y_continuous(expand = c(0, 0), limits = c(0, max(-log10(snp_data$PVAL)) + 1)) +
     geom_hline(yintercept = -log10(args$bonferroni), color = "red", linetype = "dashed") +
     geom_hline(yintercept = -log10(args$suggestive), color = "blue", linetype = "dashed") + # remove space between plot area and x axis
     ggtitle(paste0("GWID:", args$`pheno-name`)) +
@@ -104,19 +103,16 @@ generate_manhattan <- function(don, axisdf, args, colors) {
       axis.title = element_text(size = args$`title-text-size`, face = "bold"),
       panel.grid.minor.x = element_blank()
     ) +
-    geom_label_repel(data = don[is_annotate == "yes"], aes(label = SNP_ID), size = 3)
+    geom_label_repel(data = snp_data[is_annotate == "yes"], aes(label = SNP_ID), size = 3)
 
   return(manhattan)
 }
 
-generate_qqplot <- function(dt, args) {
-  # Sort by PVAL
-  # setorder(dt, PVAL)
+generate_qqplot <- function(snp_data, args) {
 
-  raw_p <- 10^(-dt$PVAL)
-  # Observe p-values
-  # observed = -log10(dt$PVAL)
-  observed <- sort(dt$PVAL)
+  raw_p <- 10^(-snp_data$PVAL)
+  # Observed p-values
+  observed <- sort(snp_data$PVAL)
 
   # Expected p-values (uniform distribution)
   expected <- sort(-log10(ppoints(length(observed))))
@@ -132,7 +128,11 @@ generate_qqplot <- function(dt, args) {
     geom_abline(intercept = 0, slope = 1, color = "red") +
     annotate("text", x = 1, y = max(observed) * 0.9, label = sprintf("λ = %.2f", lambda), size = 6) +
     labs(x = "Expected -log10(P)", y = "Observed -log10(P)") +
-    theme_classic()
+    theme_classic() +
+    theme(
+      axis.text.x = element_text(size = args$`x-axis-text-size`),
+      axis.text.y = element_text(size = args$`y-axis-text-size`),
+    )
 
   return(p)
 }
@@ -167,7 +167,6 @@ parser <- add_option(parser, c("--title-text-size"), help = "Size of the plot ti
 
 parser <- add_option(parser, c("--color-list"), help = "List of colors to be used in the Manhattan plots. Select only 2 colors and provide the colors as a comma-separated string with no spaces (Ex: 'red,blue'). Hexadecimal colors are also supported.", type = "character", default = "grey,skyblue")
 
-# parser = add_option(parser)
 
 args <- parse_args(parser)
 
