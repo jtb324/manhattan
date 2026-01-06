@@ -51,7 +51,7 @@ reformat <- function(dt, args) {
 }
 
 # If the user passes
-gather_input_files <- function(input_path, pattern, pval_col) {
+gather_input_files <- function(input_path, pattern, pval_col, chrom_col, pos_col) {
   if (dir.exists(input_path)) {
     input_files <- list.files(path = input_path, pattern = pattern, full.names = TRUE, recursive = T)
     print(paste0("Found ", length(input_files), " files from the analysis"))
@@ -63,10 +63,11 @@ gather_input_files <- function(input_path, pattern, pval_col) {
     print(paste0("Combining all ", length(input_files), " input files"))
     df <- input_files %>%
       map_dfr(~ fread(.)) %>%
-      rename(c("POS" = "GENPOS", "PVAL" = "LOG10P", "CHR" = "CHROM"))
+      rename(c("POS" = {{ pos_col }}, "PVAL" = {{ pval_col }}, "CHR" = {{ chrom_col }}))
   } else if (!dir.exists(input_path) && file.exists(input_path)) {
+    # This is the condition where the user passed a single input file nad not a directory
     df <- fread(input_path) %>%
-      rename(c("POS" = "GENPOS", "PVAL" = {{ pval_col }}, "CHR" = "CHROM"))
+      rename(c("POS" = {{ pos_col }}, "PVAL" = {{ pval_col }}, "CHR" = {{ chrom_col }}))
   }
   print(paste0("Read in ", nrow(df), " variants from the input"))
   return(df)
@@ -74,7 +75,6 @@ gather_input_files <- function(input_path, pattern, pval_col) {
 
 
 generate_manhattan <- function(snp_data, axisdf, args, colors) {
-
   snp_data[, is_annotate := ifelse(PVAL >= -log10(args$`annotate-threshold`), "yes", "no")]
 
   # Create label for annotation (Only create string for the few top hits)
@@ -102,14 +102,17 @@ generate_manhattan <- function(snp_data, axisdf, args, colors) {
       axis.text.y = element_text(size = args$`y-axis-text-size`),
       axis.title = element_text(size = args$`title-text-size`, face = "bold"),
       panel.grid.minor.x = element_blank()
-    ) +
-    geom_label_repel(data = snp_data[is_annotate == "yes"], aes(label = SNP_ID), size = 3)
+    )
+
+  if (args$`show-annotations`) {
+    manhattan <- manhattan +
+      geom_label_repel(data = snp_data[is_annotate == "yes"], aes(label = SNP_ID), size = 3)
+  }
 
   return(manhattan)
 }
 
 generate_qqplot <- function(snp_data, args) {
-
   raw_p <- 10^(-snp_data$PVAL)
   # Observed p-values
   observed <- sort(snp_data$PVAL)
@@ -151,6 +154,8 @@ parser <- add_option(parser, c("--pattern"), help = "This is the pattern that wi
 
 parser <- add_option(parser, c("--annotate-threshold"), help = "Minimum threshold to annotate SNPs on the Manhattan plot. These values should not be -log10 transformed. The default level is anything passing the Bonferroni threshold (5e-8).", type = "double", default = 5e-8)
 
+parser <- add_option(parser, c("--show-annotations"), help = "Boolean value to determine whether to show annotations on the Manhattan plot.", action = "store_true", default = FALSE)
+
 parser <- add_option(parser, c("--bonferroni"), help = "Bonferroni threshold to use for the analysis. This value should not be -log10 transformed. (default= %default)", type = "double", default = 5e-8)
 
 parser <- add_option(parser, c("--suggestive"), help = "Suggestive significance threshold. This value defaults to 1e-5 and should not be -log10 transformed.", type = "double", default = 1e-5)
@@ -158,6 +163,10 @@ parser <- add_option(parser, c("--suggestive"), help = "Suggestive significance 
 parser <- add_option(parser, c("--output-dir"), help = "Path of a directory to write the output Manhattan and QQ plots to.", type = "character", default = "./test/")
 
 parser <- add_option(parser, c("--pval-col"), help = "Name of the column that has p-values from the analysis.", type = "character", default = "PVal")
+
+parser <- add_option(parser, c("--chrom-col"), help = "Name of the column that has the chromosome information.", type = "character", default = "CHROM")
+
+parser <- add_option(parser, c("--pos-col"), help = "Name of the column that has the genomic position information.", type = "character", default = "GENPOS")
 
 parser <- add_option(parser, c("--x-axis-text-size"), help = "Size of the x-axis title text.", type = "integer", default = 12)
 
@@ -180,7 +189,7 @@ color_list <- unlist(strsplit(args$`color-list`, split = ","))
 
 stopifnot(length(color_list) != 2, paste0("Expected only 2 colors to be provided to the program. Instead ", length(color_list), " colors were provided"))
 
-df <- gather_input_files(args$input, args$pattern, args$`pval-col`)
+df <- gather_input_files(args$input, args$pattern, args$`pval-col`, args$`chrom-col`, args$`pos-col`)
 
 df <- df %>% dplyr::filter(A1FREQ >= args$`maf-threshold`)
 
